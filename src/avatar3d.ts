@@ -70,37 +70,121 @@ function shade(hex: string, amt: number): string {
   return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, "0")}`;
 }
 
-function skinMat(color: string): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
+/** Shared toon ramp — flat cartoon bands instead of plastic PBR highlights. */
+let toonGradient: THREE.DataTexture | null = null;
+
+function getToonGradient(): THREE.DataTexture {
+  if (toonGradient) return toonGradient;
+  toonGradient = new THREE.DataTexture(
+    new Uint8Array([32, 148, 255]),
+    3,
+    1,
+    THREE.RedFormat,
+  );
+  toonGradient.minFilter = THREE.NearestFilter;
+  toonGradient.magFilter = THREE.NearestFilter;
+  toonGradient.needsUpdate = true;
+  return toonGradient;
+}
+
+const OUTLINE_COLOR = 0x1a1410;
+
+function skinMat(color: string): THREE.MeshToonMaterial {
+  return new THREE.MeshToonMaterial({
     color: new THREE.Color(color),
-    roughness: 0.62,
-    metalness: 0,
+    gradientMap: getToonGradient(),
   });
 }
 
-function clothMat(color: string): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
+function clothMat(color: string): THREE.MeshToonMaterial {
+  return new THREE.MeshToonMaterial({
     color: new THREE.Color(color),
-    roughness: 0.82,
-    metalness: 0,
+    gradientMap: getToonGradient(),
   });
 }
 
-function hairMat(color: string): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({
+function hairMat(color: string): THREE.MeshToonMaterial {
+  return new THREE.MeshToonMaterial({
     color: new THREE.Color(color),
-    roughness: 0.45,
-    metalness: 0.05,
+    gradientMap: getToonGradient(),
   });
+}
+
+/** Dark ink line around body meshes so limbs read as illustration, not editor primitives. */
+function addCartoonOutline(mesh: THREE.Mesh, track: Rig, scale = 1.055): void {
+  const outlineMat = new THREE.MeshBasicMaterial({
+    color: OUTLINE_COLOR,
+    side: THREE.BackSide,
+  });
+  track.materials.push(outlineMat);
+  const shell = new THREE.Mesh(mesh.geometry, outlineMat);
+  shell.scale.set(scale, scale, scale);
+  shell.renderOrder = mesh.renderOrder - 1;
+  mesh.add(shell);
+}
+
+function characterMesh(
+  geo: THREE.BufferGeometry,
+  mat: THREE.Material,
+  track: Rig,
+  outlineScale = 1.055,
+): THREE.Mesh {
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.castShadow = true;
+  addCartoonOutline(mesh, track, outlineScale);
+  track.geometries.push(geo);
+  return mesh;
 }
 
 /** Capsule hanging downward from a joint at the local origin. */
-function limb(radius: number, length: number, mat: THREE.Material): THREE.Mesh {
-  const geo = new THREE.CapsuleGeometry(radius, length, 4, 16);
-  const mesh = new THREE.Mesh(geo, mat);
+function limb(radius: number, length: number, mat: THREE.Material, track: Rig): THREE.Mesh {
+  const geo = new THREE.CapsuleGeometry(radius, length, 8, 24);
+  const mesh = characterMesh(geo, mat, track, 1.05);
   mesh.position.y = -length / 2;
-  mesh.castShadow = true;
   return mesh;
+}
+
+/** Full cartoon hand: chunky palm, four fingers, thumb. Never a flat paddle. */
+function buildHand(isLeft: boolean, girth: number, mat: THREE.Material, track: Rig): THREE.Group {
+  const g = new THREE.Group();
+  const side = isLeft ? 1 : -1;
+  const s = girth;
+
+  const wrist = characterMesh(new THREE.SphereGeometry(0.018 * s, 14, 12), mat, track, 1.03);
+  g.add(wrist);
+
+  const palmGeo = new THREE.BoxGeometry(0.058 * s, 0.062, 0.034 * s);
+  const palm = characterMesh(palmGeo, mat, track, 1.04);
+  palm.position.y = -0.038;
+  g.add(palm);
+
+  const heel = characterMesh(new THREE.SphereGeometry(0.02 * s, 12, 10), mat, track, 1.03);
+  heel.scale.set(1.35, 0.7, 0.95);
+  heel.position.y = -0.012;
+  g.add(heel);
+
+  const fingerR = 0.01 * s;
+  const fingerX = [-0.02, -0.007, 0.007, 0.02].map((v) => v * s);
+  const fingerLen = [0.036, 0.044, 0.046, 0.038];
+  for (let i = 0; i < 4; i++) {
+    const finger = characterMesh(
+      new THREE.CapsuleGeometry(fingerR, fingerLen[i], 5, 10),
+      mat,
+      track,
+      1.03,
+    );
+    finger.position.set(fingerX[i], -0.078 - fingerLen[i] * 0.22, 0.004);
+    finger.rotation.x = -0.18;
+    g.add(finger);
+  }
+
+  const thumb = characterMesh(new THREE.CapsuleGeometry(0.012 * s, 0.038, 5, 10), mat, track, 1.03);
+  thumb.position.set(side * 0.034 * s, -0.032, 0.02);
+  thumb.rotation.z = side * 0.95;
+  thumb.rotation.x = -0.85;
+  g.add(thumb);
+
+  return g;
 }
 
 function bone(name: string, parent: THREE.Object3D, y: number, x = 0, z = 0): THREE.Object3D {
@@ -539,40 +623,30 @@ export function buildRig(data: CharData): Rig {
   b[BONE.neck] = bone(BONE.neck, b[BONE.spine2], SEG.neck);
   b[BONE.head] = bone(BONE.head, b[BONE.neck], SEG.headUp);
 
-  // Pelvis + torso
-  const pelvisGeo = new THREE.CapsuleGeometry(0.098 * girth, 0.05, 4, 18);
-  const pelvis = new THREE.Mesh(pelvisGeo, mPants);
+  // Pelvis + torso — rounded capsules read as a toy figure, not separate tubes.
+  const pelvisGeo = new THREE.CapsuleGeometry(0.098 * girth, 0.05, 8, 24);
+  const pelvis = characterMesh(pelvisGeo, mPants, track);
   pelvis.scale.set(1.14, 1, 0.8);
   pelvis.position.y = -0.005;
-  pelvis.castShadow = true;
   b[BONE.hips].add(pelvis);
-  track.geometries.push(pelvisGeo);
 
-  // Torso as a tapered cylinder: a capsule's rounded bottom produced a
-  // scalloped, faceted shirt hem.
-  const chestGeo = new THREE.CylinderGeometry(0.118 * girth, 0.1 * girth, 0.34, 28, 1);
-  const chest = new THREE.Mesh(chestGeo, mShirt);
-  chest.scale.set(1.18, 1, 0.72);
-  chest.castShadow = true;
+  const chestGeo = new THREE.CapsuleGeometry(0.11 * girth, 0.22, 8, 28);
+  const chest = characterMesh(chestGeo, mShirt, track);
+  chest.scale.set(1.14, 1.08, 0.76);
+  chest.position.y = -0.02;
   b[BONE.spine1].add(chest);
-  track.geometries.push(chestGeo);
   b[BONE.spine1].add(buildVibeAccent(data.vibe || "smug", track));
 
-  // Rounds off the shoulder line where the cylinder would otherwise end flat.
-  const shoulderCapGeo = new THREE.SphereGeometry(0.118 * girth, 24, 16);
-  const shoulderCap = new THREE.Mesh(shoulderCapGeo, mShirt);
-  shoulderCap.scale.set(1.18, 0.72, 0.72);
-  shoulderCap.position.y = 0.035;
-  shoulderCap.castShadow = true;
+  const shoulderCapGeo = new THREE.SphereGeometry(0.1 * girth, 28, 20);
+  const shoulderCap = characterMesh(shoulderCapGeo, mShirt, track, 1.04);
+  shoulderCap.scale.set(1.22, 0.62, 0.72);
+  shoulderCap.position.y = 0.03;
   b[BONE.spine2].add(shoulderCap);
-  track.geometries.push(shoulderCapGeo);
 
-  const neckGeo = new THREE.CylinderGeometry(0.043, 0.052, 0.12, 16);
-  const neck = new THREE.Mesh(neckGeo, mSkin);
+  const neckGeo = new THREE.CapsuleGeometry(0.04, 0.06, 6, 16);
+  const neck = characterMesh(neckGeo, mSkin, track, 1.04);
   neck.position.y = 0.015;
-  neck.castShadow = true;
   b[BONE.neck].add(neck);
-  track.geometries.push(neckGeo);
 
   // Head. Face shape scales a wrapper so hair and features stay aligned with
   // the skull surface instead of sinking into it.
@@ -581,19 +655,16 @@ export function buildRig(data: CharData): Rig {
   headGroup.scale.copy(headScale);
   b[BONE.head].add(headGroup);
 
-  const headGeo = new THREE.SphereGeometry(HEAD_R, 32, 24);
-  const headMesh = new THREE.Mesh(headGeo, mSkin);
-  headMesh.castShadow = true;
+  const headGeo = new THREE.SphereGeometry(HEAD_R, 36, 28);
+  const headMesh = characterMesh(headGeo, mSkin, track, 1.06);
   headGroup.add(headMesh);
-  track.geometries.push(headGeo);
 
   const jawShape = jawShapeFor(data.face || "round");
-  const jawGeo = new THREE.CapsuleGeometry(0.062, 0.03, 4, 16);
-  const jaw = new THREE.Mesh(jawGeo, mSkin);
+  const jawGeo = new THREE.CapsuleGeometry(0.062, 0.03, 6, 18);
+  const jaw = characterMesh(jawGeo, mSkin, track, 1.05);
   jaw.position.set(0, jawShape.y, 0.028);
   jaw.scale.copy(jawShape.scale);
   headGroup.add(jaw);
-  track.geometries.push(jawGeo);
 
   track.face = buildFace(headGroup, skin, hair, track);
   headGroup.add(
@@ -608,46 +679,41 @@ export function buildRig(data: CharData): Rig {
     const shoulder = bone(
       isLeft ? BONE.lShoulder : BONE.rShoulder,
       b[BONE.spine2],
-      0.015,
+      0.0,
       side * shoulderX * 0.5,
+      0.0,
     );
     b[shoulder.name] = shoulder;
 
     const arm = bone(isLeft ? BONE.lArm : BONE.rArm, shoulder, 0, side * shoulderX * 0.5);
     b[arm.name] = arm;
-    arm.add(limb(0.047 * limbGirth, SEG.upperArm, mSkin));
+    arm.add(limb(0.047 * limbGirth, SEG.upperArm, mSkin, track));
 
-    // Sleeve cap; sized to overlap the chest so the joint never shows a seam.
-    const deltoidGeo = new THREE.SphereGeometry(0.065 * limbGirth, 18, 14);
-    const deltoid = new THREE.Mesh(deltoidGeo, mShirt);
-    deltoid.scale.set(1, 1.15, 1);
-    deltoid.castShadow = true;
+    // Soft shoulder puff — smaller so it doesn't read as a floating orange ball.
+    const deltoidGeo = new THREE.SphereGeometry(0.052 * limbGirth, 22, 16);
+    const deltoid = characterMesh(deltoidGeo, mShirt, track, 1.03);
+    deltoid.scale.set(1, 1.05, 0.95);
     arm.add(deltoid);
-    track.geometries.push(deltoidGeo);
 
     const fore = bone(isLeft ? BONE.lForeArm : BONE.rForeArm, arm, -SEG.upperArm);
     b[fore.name] = fore;
-    fore.add(limb(0.04 * limbGirth, SEG.foreArm, mSkin));
+    // Stop the forearm short of the wrist so the hand isn't buried in the capsule.
+    fore.add(limb(0.036 * limbGirth, SEG.foreArm - 0.07, mSkin, track));
 
-    const elbowGeo = new THREE.SphereGeometry(0.043 * limbGirth, 14, 12);
-    const elbow = new THREE.Mesh(elbowGeo, mSkin);
+    const elbowGeo = new THREE.SphereGeometry(0.038 * limbGirth, 18, 14);
+    const elbow = characterMesh(elbowGeo, mSkin, track, 1.03);
     fore.add(elbow);
-    track.geometries.push(elbowGeo);
 
     const hand = bone(isLeft ? BONE.lHand : BONE.rHand, fore, -SEG.foreArm);
     b[hand.name] = hand;
-    const fistGeo = new THREE.SphereGeometry(0.043 * limbGirth, 16, 14);
-    const fist = new THREE.Mesh(fistGeo, mSkin);
-    fist.position.y = -0.028;
-    fist.scale.set(0.9, 1.1, 0.9);
-    fist.castShadow = true;
-    hand.add(fist);
-    track.geometries.push(fistGeo);
+    hand.add(buildHand(isLeft, limbGirth, mSkin, track));
+    // Turn the palm a little so four fingers and the thumb read from the side.
+    hand.rotation.set(0.12, isLeft ? 0.7 : -0.7, isLeft ? 0.12 : -0.12);
 
-    // Arms rest slightly away from the body.
+    // Arms rest slightly away from the body and toward +Z (the camera / face).
     arm.rotation.z = side * 0.12;
-    arm.rotation.x = 0.06;
-    fore.rotation.x = 0.18;
+    arm.rotation.x = REST_ARM_X;
+    fore.rotation.x = REST_FORE_X;
   }
 
   // Legs
@@ -656,16 +722,15 @@ export function buildRig(data: CharData): Rig {
     const isLeft = side < 0;
     const upLeg = bone(isLeft ? BONE.lUpLeg : BONE.rUpLeg, b[BONE.hips], -0.03, side * hipX);
     b[upLeg.name] = upLeg;
-    upLeg.add(limb(0.057 * limbGirth, SEG.upLeg, mPants));
+    upLeg.add(limb(0.057 * limbGirth, SEG.upLeg, mPants, track));
 
     const lowLeg = bone(isLeft ? BONE.lLeg : BONE.rLeg, upLeg, -SEG.upLeg);
     b[lowLeg.name] = lowLeg;
-    lowLeg.add(limb(0.045 * limbGirth, SEG.lowLeg, mPants));
+    lowLeg.add(limb(0.045 * limbGirth, SEG.lowLeg, mPants, track));
 
-    const kneeGeo = new THREE.SphereGeometry(0.05 * limbGirth, 14, 12);
-    const knee = new THREE.Mesh(kneeGeo, mPants);
+    const kneeGeo = new THREE.SphereGeometry(0.048 * limbGirth, 18, 14);
+    const knee = characterMesh(kneeGeo, mPants, track, 1.03);
     lowLeg.add(knee);
-    track.geometries.push(kneeGeo);
 
     const foot = bone(isLeft ? BONE.lFoot : BONE.rFoot, lowLeg, -SEG.lowLeg);
     b[foot.name] = foot;
@@ -727,7 +792,7 @@ function applyMood(rig: Rig, mood: Mood): void {
   }
 
   f.tears.visible = !!p.tears;
-  rig.bones[BONE.head].rotation.z = p.headTilt;
+  // Head tilt is applied every frame in tick(); mood only drives the face meshes.
 }
 
 /* ————————————————— combat animation ————————————————— */
@@ -745,6 +810,8 @@ interface ClipFrame {
 
 interface Clip {
   dur: number;
+  /** When set, t wraps and the clip is not time-scaled — used for the walk cycle. */
+  loop?: boolean;
   frame: (t: number) => ClipFrame;
 }
 
@@ -753,6 +820,33 @@ const CLIP_TIME_SCALE = 1.75;
 
 function lerp(a: number, b: number, k: number): number {
   return a + (b - a) * k;
+}
+
+/**
+ * Bones hang down -Y. Positive rotation.x swings a limb toward -Z (away from
+ * the camera / opponent); negative rotation.x swings it toward +Z (forward).
+ */
+function resetCombatBones(b: BoneMap): void {
+  b[BONE.spine].rotation.set(-0.02, 0, 0);
+  b[BONE.spine1].rotation.set(0, 0, 0);
+  b[BONE.spine2].rotation.set(0, 0, 0);
+  b[BONE.neck].rotation.set(0, 0, 0);
+  b[BONE.head].rotation.set(0, 0, 0);
+  b[BONE.hips].rotation.set(0, 0, 0);
+  b[BONE.lShoulder].rotation.set(0, 0, 0);
+  b[BONE.rShoulder].rotation.set(0, 0, 0);
+  b[BONE.lArm].rotation.set(REST_ARM_X, 0, -0.12);
+  b[BONE.rArm].rotation.set(REST_ARM_X, 0, 0.12);
+  b[BONE.lForeArm].rotation.set(REST_FORE_X, 0, 0);
+  b[BONE.rForeArm].rotation.set(REST_FORE_X, 0, 0);
+  b[BONE.lHand].rotation.set(0.12, 0.7, 0.12);
+  b[BONE.rHand].rotation.set(0.12, -0.7, -0.12);
+  b[BONE.lUpLeg].rotation.set(0, 0, -0.03);
+  b[BONE.rUpLeg].rotation.set(0, 0, 0.03);
+  b[BONE.lLeg].rotation.set(0, 0, 0);
+  b[BONE.rLeg].rotation.set(0, 0, 0);
+  b[BONE.lFoot].rotation.set(0, 0, 0);
+  b[BONE.rFoot].rotation.set(0, 0, 0);
 }
 
 /** Smoothstep-interpolated keyframe track. */
@@ -771,8 +865,10 @@ function key(t: number, points: Array<[number, number]>): number {
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 
 // Rest values the idle pass writes, so clips can blend back to a real stance.
-const REST_ARM_X = 0.06;
-const REST_FORE_X = 0.18;
+// Negative X on the upper arm AND forearm swings toward +Z (the opponent),
+// so elbows sit as `<` on You and `>` on the foe — never bent the wrong way.
+const REST_ARM_X = -0.22;
+const REST_FORE_X = -0.32;
 
 /**
  * Windup/strike/recover on a single track: negative is the windup, +1 is full
@@ -785,7 +881,7 @@ const REST_FORE_X = 0.18;
 const SWING = {
   punch: [
     [0, 0],
-    [0.22, -0.5],
+    [0.2, -0.22],
     [0.37, 1],
     [0.56, 0.85],
     [1, 0],
@@ -799,43 +895,49 @@ const SWING = {
   ] as Array<[number, number]>,
 };
 
-/** Arms pinned in a loose guard — used by the leg and torso attacks. */
+/** Arms up in front — used by the leg and torso attacks. */
 function guard(amount: number): Pose {
   return {
-    [BONE.lArm]: { x: REST_ARM_X - 0.55 * amount, z: -0.12 - 0.32 * amount },
-    [BONE.rArm]: { x: REST_ARM_X - 0.45 * amount, z: 0.12 + 0.3 * amount },
-    [BONE.lForeArm]: { x: REST_FORE_X + 1.15 * amount },
-    [BONE.rForeArm]: { x: REST_FORE_X + 1.05 * amount },
+    [BONE.rArm]: { x: REST_ARM_X - 0.55 * amount, z: -0.12 - 0.22 * amount },
+    [BONE.lArm]: { x: REST_ARM_X - 0.45 * amount, z: 0.12 + 0.2 * amount },
+    [BONE.rForeArm]: { x: REST_FORE_X - 1.15 * amount },
+    [BONE.lForeArm]: { x: REST_FORE_X - 1.05 * amount },
   };
 }
 
 const ATTACK_CLIPS: Record<string, Clip> = {
-  /** Covers the CSS slide into contact range, which would otherwise skate. */
+  /**
+   * In-place gait that loops for the whole CSS slide. Opposite arm and leg,
+   * bent knees, swinging hands — a one-shot 400ms shuffle looked like skating.
+   */
   walk: {
-    dur: 400,
+    dur: 520,
+    loop: true,
     frame(t) {
-      const hold = key(t, [
-        [0, 0],
-        [0.15, 1],
-        [0.8, 1],
-        [1, 0],
-      ]);
-      const c = t * Math.PI * 2 * 1.5;
-      const s = Math.sin(c) * hold;
-      const s2 = Math.sin(c + Math.PI) * hold;
+      const a = t * Math.PI * 2;
+      const L = Math.sin(a);
+      const R = -L;
+      const kneeL = Math.max(0, L);
+      const kneeR = Math.max(0, R);
+      const liftL = Math.max(0, L);
+      const liftR = Math.max(0, R);
       return {
         pose: {
-          [BONE.lUpLeg]: { x: s * 0.6 },
-          [BONE.rUpLeg]: { x: s2 * 0.6 },
-          [BONE.lLeg]: { x: clamp01(-s) * 0.9 },
-          [BONE.rLeg]: { x: clamp01(-s2) * 0.9 },
-          [BONE.lArm]: { x: REST_ARM_X + s2 * 0.45 },
-          [BONE.rArm]: { x: REST_ARM_X + s * 0.45 },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.5 * hold },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.5 * hold },
-          [BONE.spine]: { x: 0.08 * hold },
+          [BONE.lUpLeg]: { x: -L * 0.95 },
+          [BONE.rUpLeg]: { x: -R * 0.95 },
+          [BONE.lLeg]: { x: kneeL * 0.85 },
+          [BONE.rLeg]: { x: kneeR * 0.85 },
+          [BONE.lFoot]: { x: liftL * 0.25 },
+          [BONE.rFoot]: { x: liftR * 0.25 },
+          [BONE.rArm]: { x: REST_ARM_X + L * 0.4, z: -0.12 },
+          [BONE.lArm]: { x: REST_ARM_X + R * 0.4, z: 0.12 },
+          [BONE.rForeArm]: { x: REST_FORE_X - liftR * 0.45 },
+          [BONE.lForeArm]: { x: REST_FORE_X - liftL * 0.45 },
+          [BONE.rHand]: { x: R * 0.15 },
+          [BONE.lHand]: { x: L * 0.15 },
+          [BONE.spine]: { x: 0.04 },
         },
-        hipY: Math.abs(Math.sin(c)) * 0.02 * hold,
+        hipY: Math.abs(Math.sin(a * 2)) * 0.025,
       };
     },
   },
@@ -848,19 +950,20 @@ const ATTACK_CLIPS: Record<string, Clip> = {
       const back = clamp01(-e);
       return {
         pose: {
-          // Angled slightly up so the fist arrives at head height, where the
-          // game places the impact burst.
-          [BONE.rArm]: { x: REST_ARM_X - 1.95 * e, z: 0.12 - 0.1 * out },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.95 * (1 - out) + 1.3 * back - 0.18 },
-          [BONE.rShoulder]: { y: -0.3 * e },
-          [BONE.lArm]: { x: REST_ARM_X + 0.5 * e, z: -0.12 - 0.2 * out },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.2 * out },
-          [BONE.spine1]: { y: -0.4 * e },
-          [BONE.spine2]: { y: -0.22 * e },
-          [BONE.hips]: { y: -0.2 * e },
-          [BONE.head]: { y: -0.12 * e },
-          [BONE.rUpLeg]: { x: -0.22 * out },
-          [BONE.lLeg]: { x: 0.25 * out },
+          // Negative X drives the fist toward +Z (the opponent). Windup is the
+          // reverse: a positive X pull-back, then the strike and the wrist.
+          [BONE.lArm]: { x: REST_ARM_X - 1.95 * e, z: 0.12 - 0.08 * out },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.15 * back - 0.35 * out },
+          [BONE.lHand]: { x: 0.35 * back - 0.45 * out },
+          [BONE.lShoulder]: { y: -0.28 * e },
+          // Off-hand stays a chest guard in front — never flung behind the back.
+          [BONE.rArm]: { x: REST_ARM_X - 0.5 * out, z: -0.12 },
+          [BONE.rForeArm]: { x: REST_FORE_X - 1.05 * out },
+          [BONE.spine1]: { x: 0.14 * out },
+          [BONE.spine]: { x: 0.06 * out - 0.04 * back },
+          [BONE.rUpLeg]: { x: -0.28 * out },
+          [BONE.lUpLeg]: { x: 0.12 * out },
+          [BONE.lLeg]: { x: 0.2 * out },
         },
         root: { z: 0.16 * out },
       };
@@ -872,32 +975,35 @@ const ATTACK_CLIPS: Record<string, Clip> = {
     frame(t) {
       const raise = key(t, [
         [0, 0],
-        [0.18, 1],
-        [0.7, 1],
+        [0.16, 1],
+        [0.72, 1],
         [1, 0],
       ]);
-      const sweep = key(t, [
+      const strike = key(t, [
         [0, 0],
-        [0.2, -1],
+        [0.2, 0],
         [0.36, 1],
-        [0.6, 0.75],
+        [0.55, 0.8],
         [1, 0],
       ]);
-      // The shoulder yaw carries the swing: cocked out to the side on the
-      // windup, ending aimed at the target rather than swinging past it.
       return {
         pose: {
-          [BONE.rArm]: { x: REST_ARM_X - 1.9 * raise, z: 0.12 + 0.3 * raise },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.25 * raise },
-          [BONE.rShoulder]: { y: 0.375 - 0.475 * sweep },
-          [BONE.lArm]: { x: REST_ARM_X - 0.5 * raise },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.1 * raise },
-          [BONE.spine1]: { y: -0.45 * sweep },
-          [BONE.spine2]: { y: -0.2 * sweep },
-          [BONE.head]: { y: -0.25 * sweep },
-          [BONE.hips]: { y: -0.18 * sweep },
+          // Open-hand slap in FRONT of the chest toward +Z (the opponent).
+          // Keep the elbow nearly straight — a big +forearm.x folded the arm
+          // behind the back. Shoulder yaw stays tiny so the arc never wraps aft.
+          [BONE.lArm]: {
+            x: REST_ARM_X - 1.25 * raise - 0.55 * strike,
+            z: 0.22 + 0.42 * raise - 0.12 * strike,
+          },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.08 * raise - 0.22 * strike },
+          [BONE.lHand]: { x: -0.25 * strike, y: 0.55 + 0.5 * strike, z: 0.08 * raise },
+          [BONE.lShoulder]: { y: -0.1 * strike },
+          [BONE.rArm]: { x: REST_ARM_X - 0.35 * raise, z: -0.12 },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.55 * raise },
+          [BONE.spine1]: { x: 0.1 * strike },
+          [BONE.spine]: { x: 0.06 * strike },
         },
-        root: { z: 0.14 * clamp01(sweep) },
+        root: { z: 0.12 * strike },
       };
     },
   },
@@ -916,18 +1022,18 @@ const ATTACK_CLIPS: Record<string, Clip> = {
       const back = clamp01(-e);
       return {
         pose: {
-          ...guard(out * 0.6),
-          [BONE.rUpLeg]: { x: -1.55 * e },
-          [BONE.rLeg]: { x: 1.15 * (1 - out) + 1.0 * back - 0.05 },
-          [BONE.rFoot]: { x: -0.55 * out },
-          [BONE.lLeg]: { x: 0.3 * out },
-          [BONE.spine]: { x: 0.4 * out - 0.15 * back },
-          [BONE.spine1]: { x: 0.12 * out },
-          [BONE.lArm]: { x: REST_ARM_X + 0.9 * out, z: -0.12 - 0.5 * out },
-          [BONE.rArm]: { x: REST_ARM_X - 0.6 * out, z: 0.12 + 0.35 * out },
+          ...guard(out * 0.35),
+          // Kick on clip-left so You (mirror) uses the right/inside leg toward the foe.
+          [BONE.lUpLeg]: { x: -1.55 * e },
+          [BONE.lLeg]: { x: 1.0 * back + 0.15 * (1 - out) },
+          [BONE.lFoot]: { x: -0.35 * out },
+          [BONE.rUpLeg]: { x: 0.15 * out },
+          [BONE.rLeg]: { x: 0.25 * out },
+          [BONE.spine]: { x: 0.35 * out - 0.12 * back },
+          [BONE.spine1]: { x: 0.1 * out },
         },
         hipY: -0.05 * out,
-        root: { z: 0.06 * out, pitch: -0.1 * out },
+        root: { z: 0.08 * out },
       };
     },
   },
@@ -941,18 +1047,18 @@ const ATTACK_CLIPS: Record<string, Clip> = {
       // The head of the weapon hangs below the fist, so the swing ends with the
       // arm forward and the wrist snapped over — that is what puts the hammer
       // out in front at head height instead of buried in the floor.
-      const armX = e < 0 ? lerp(REST_ARM_X, -2.5, back) : lerp(REST_ARM_X, -1.5, out);
-      const foreX = e < 0 ? lerp(REST_FORE_X, 0.45, back) : lerp(REST_FORE_X, 0.05, out);
+      const armX = e < 0 ? lerp(REST_ARM_X, 2.2, back) : lerp(REST_ARM_X, -1.7, out);
+      const foreX = e < 0 ? lerp(REST_FORE_X, -0.85, back) : lerp(REST_FORE_X, -0.2, out);
       const wristX = e < 0 ? 0.5 * back : -1.4 * out;
       return {
         pose: {
           [BONE.rArm]: { x: armX, z: 0.12 + 0.18 * back },
           [BONE.rForeArm]: { x: foreX },
           [BONE.rHand]: { x: wristX },
-          [BONE.lArm]: { x: lerp(REST_ARM_X, -1.9, back * 0.7) + 0.3 * out },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.0 * back + 0.5 * out },
+          [BONE.lArm]: { x: lerp(REST_ARM_X, 0.7, back * 0.7) - 0.3 * out },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.0 * back + 0.5 * out },
           [BONE.spine]: { x: -0.24 * back + 0.3 * out },
-          [BONE.spine1]: { x: -0.1 * back + 0.14 * out, y: -0.18 * e },
+          [BONE.spine1]: { x: -0.1 * back + 0.14 * out },
           [BONE.head]: { x: -0.22 * back + 0.2 * out },
           [BONE.lLeg]: { x: 0.3 * out },
         },
@@ -983,13 +1089,13 @@ const ATTACK_CLIPS: Record<string, Clip> = {
             z: 0.12 + 0.15 * out,
           },
           [BONE.rForeArm]: {
-            x: e < 0 ? lerp(REST_FORE_X, 1.4, back) : lerp(REST_FORE_X, -1.3, out),
+            x: e < 0 ? lerp(REST_FORE_X, -1.2, back) : lerp(REST_FORE_X, -0.05, out),
           },
           [BONE.rShoulder]: { y: -0.2 * out },
           [BONE.lArm]: { x: REST_ARM_X - 0.5 * out },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.25 * out },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.25 * out },
           [BONE.spine]: { x: 0.32 * back - 0.3 * out },
-          [BONE.spine1]: { y: -0.3 * e },
+          [BONE.spine1]: { x: 0.12 * out },
           [BONE.lUpLeg]: { x: 0.5 * back },
           [BONE.rUpLeg]: { x: 0.5 * back },
           [BONE.lLeg]: { x: -0.7 * back },
@@ -1042,8 +1148,8 @@ const ATTACK_CLIPS: Record<string, Clip> = {
         pose: {
           [BONE.lArm]: { x: REST_ARM_X - 1.6 * e, z: -0.12 - 0.12 * out },
           [BONE.rArm]: { x: REST_ARM_X - 1.6 * e, z: 0.12 + 0.12 * out },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.0 * (1 - out) - 0.15 },
-          [BONE.rForeArm]: { x: REST_FORE_X + 1.0 * (1 - out) - 0.15 },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.0 * (1 - out) - 0.15 },
+          [BONE.rForeArm]: { x: REST_FORE_X - 1.0 * (1 - out) - 0.15 },
           [BONE.spine1]: { x: 0.24 * out },
           [BONE.lLeg]: { x: 0.28 * out },
         },
@@ -1066,13 +1172,12 @@ const ATTACK_CLIPS: Record<string, Clip> = {
       const back = clamp01(-e);
       return {
         pose: {
-          [BONE.rArm]: { x: e < 0 ? lerp(REST_ARM_X, -2.4, back) : lerp(REST_ARM_X, -1.15, out) },
-          [BONE.rForeArm]: { x: REST_FORE_X + 1.5 * back + 0.05 * out },
+          [BONE.rArm]: { x: e < 0 ? lerp(REST_ARM_X, 1.35, back) : lerp(REST_ARM_X, -2.05, out) },
+          [BONE.rForeArm]: { x: REST_FORE_X - 1.5 * back + 0.05 * out },
           [BONE.rShoulder]: { y: -0.25 * e },
           [BONE.lArm]: { x: REST_ARM_X - 0.8 * out, z: -0.12 - 0.3 * out },
-          [BONE.spine1]: { y: -0.38 * e },
+          [BONE.spine1]: { x: 0.1 * out },
           [BONE.spine]: { x: -0.15 * back + 0.2 * out },
-          [BONE.head]: { y: -0.14 * e },
         },
       };
     },
@@ -1092,8 +1197,8 @@ const ATTACK_CLIPS: Record<string, Clip> = {
         pose: {
           [BONE.lArm]: { x: REST_ARM_X - 1.5 * hold, z: -0.12 - 0.3 * hold },
           [BONE.rArm]: { x: REST_ARM_X - 1.5 * hold, z: 0.12 + 0.3 * hold },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.3 * hold },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.3 * hold },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.3 * hold },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.3 * hold },
           [BONE.spine1]: { y: rattle * 0.12 },
           [BONE.head]: { y: rattle * 0.1 },
         },
@@ -1123,8 +1228,8 @@ const ATTACK_CLIPS: Record<string, Clip> = {
         pose: {
           [BONE.lArm]: { x: REST_ARM_X - 2.2 * lift - 0.4 * slam, z: -0.12 - 0.25 * lift },
           [BONE.rArm]: { x: REST_ARM_X - 2.2 * lift - 0.4 * slam, z: 0.12 + 0.25 * lift },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.9 * lift },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.9 * lift },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.9 * lift },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.9 * lift },
           [BONE.spine]: { x: -0.2 * lift + 0.45 * slam },
           [BONE.head]: { x: -0.25 * lift + 0.35 * slam },
         },
@@ -1146,10 +1251,10 @@ const ATTACK_CLIPS: Record<string, Clip> = {
       const sway = Math.sin(t * Math.PI * 4) * hold;
       return {
         pose: {
-          [BONE.lArm]: { x: REST_ARM_X + 0.5 * hold, z: -0.12 - 0.62 * hold },
-          [BONE.rArm]: { x: REST_ARM_X + 0.5 * hold, z: 0.12 + 0.62 * hold },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.5 * hold },
-          [BONE.rForeArm]: { x: REST_FORE_X + 1.5 * hold },
+          [BONE.lArm]: { x: REST_ARM_X - 0.25 * hold, z: -0.12 - 0.62 * hold },
+          [BONE.rArm]: { x: REST_ARM_X - 0.25 * hold, z: 0.12 + 0.62 * hold },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.5 * hold },
+          [BONE.rForeArm]: { x: REST_FORE_X - 1.5 * hold },
           [BONE.spine1]: { y: sway * 0.18, x: -0.12 * hold },
           [BONE.hips]: { y: -sway * 0.14, z: sway * 0.05 },
           [BONE.head]: { x: -0.16 * hold, z: sway * 0.12 },
@@ -1170,13 +1275,13 @@ const ATTACK_CLIPS: Record<string, Clip> = {
       ]);
       const out = clamp01(e);
       const back = clamp01(-e);
-      const armX = e < 0 ? lerp(REST_ARM_X, -2.9, back) : lerp(REST_ARM_X, -0.35, out);
+      const armX = e < 0 ? lerp(REST_ARM_X, 2.4, back) : lerp(REST_ARM_X, -1.85, out);
       return {
         pose: {
           [BONE.lArm]: { x: armX, z: -0.12 - 0.3 * back },
           [BONE.rArm]: { x: armX, z: 0.12 + 0.3 * back },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.2 * back },
-          [BONE.rForeArm]: { x: REST_FORE_X + 1.2 * back },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.2 * back },
+          [BONE.rForeArm]: { x: REST_FORE_X - 1.2 * back },
           [BONE.spine]: { x: -0.35 * back + 0.55 * out },
           [BONE.spine1]: { x: -0.15 * back + 0.25 * out },
           [BONE.head]: { x: -0.35 * back + 0.4 * out },
@@ -1206,85 +1311,90 @@ const ATTACK_ALIAS: Record<string, string> = {
 
 const REACT_CLIPS: Record<string, Clip> = {
   hit: {
-    dur: 560,
+    dur: 640,
     frame(t) {
       const k = key(t, [
         [0, 0],
-        [0.18, 1],
-        [0.42, -0.25],
-        [0.68, 0.12],
+        [0.14, 1],
+        [0.32, 0.55],
+        [0.5, 0.85],
+        [0.78, 0.2],
         [1, 0],
       ]);
+      const flop = Math.sin(t * Math.PI * 6) * clamp01(k);
       return {
         pose: {
-          [BONE.head]: { x: 0.6 * k },
-          [BONE.neck]: { x: 0.34 * k },
-          [BONE.spine1]: { x: -0.34 * k },
-          [BONE.spine]: { x: -0.2 * k },
-          [BONE.lArm]: { x: REST_ARM_X + 0.55 * k, z: -0.12 - 0.4 * clamp01(k) },
-          [BONE.rArm]: { x: REST_ARM_X + 0.45 * k, z: 0.12 + 0.4 * clamp01(k) },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.7 * clamp01(k) },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.7 * clamp01(k) },
-          [BONE.lUpLeg]: { x: 0.3 * k },
+          [BONE.head]: { x: 0.55 * k, z: flop * 0.2 },
+          [BONE.neck]: { x: 0.28 * k },
+          [BONE.spine1]: { x: -0.45 * k },
+          [BONE.spine]: { x: -0.32 * k },
+          [BONE.lArm]: { x: REST_ARM_X - 1.1 * k + flop * 0.35, z: -0.12 - 0.45 * k },
+          [BONE.rArm]: { x: REST_ARM_X - 0.7 * k - flop * 0.4, z: 0.12 + 0.5 * k },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.9 * k },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.55 * k },
+          [BONE.lUpLeg]: { x: 0.45 * k },
+          [BONE.rUpLeg]: { x: -0.35 * k },
+          [BONE.rLeg]: { x: 0.55 * k },
         },
-        root: { z: -0.14 * clamp01(k) },
+        hipY: -0.04 * k,
+        root: { pitch: 0.28 * k, z: -0.08 * clamp01(k) },
       };
     },
   },
 
   spin: {
-    dur: 720,
+    dur: 820,
     frame(t) {
-      const turn = key(t, [
-        [0, 0],
-        [0.62, 1],
-        [1, 1],
-      ]);
       const k = key(t, [
         [0, 0],
-        [0.18, 1],
-        [0.5, 0.3],
+        [0.16, 1],
+        [0.55, 0.45],
         [1, 0],
       ]);
+      const spin = Math.sin(t * Math.PI * 4);
       return {
         pose: {
-          [BONE.head]: { x: 0.5 * k, z: 0.3 * k },
-          [BONE.spine1]: { x: -0.25 * k },
-          [BONE.lArm]: { x: REST_ARM_X + 0.8 * k, z: -0.12 - 0.7 * k },
-          [BONE.rArm]: { x: REST_ARM_X + 0.8 * k, z: 0.12 + 0.7 * k },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.5 * k },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.5 * k },
+          [BONE.head]: { x: 0.4 * k, z: spin * 0.35 * k },
+          [BONE.spine1]: { x: -0.3 * k, z: spin * 0.12 * k },
+          [BONE.lArm]: { x: REST_ARM_X - 1.4 * k, z: -0.12 - 0.55 * k },
+          [BONE.rArm]: { x: REST_ARM_X - 1.4 * k, z: 0.12 + 0.55 * k },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.7 * k },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.7 * k },
+          [BONE.lUpLeg]: { x: 0.3 * k },
+          [BONE.rUpLeg]: { x: -0.4 * k },
         },
-        root: { yaw: turn * Math.PI * 2, z: -0.1 * k },
+        root: { pitch: 0.22 * k, roll: spin * 0.18 * k, z: -0.06 * k },
       };
     },
   },
 
   launch: {
-    dur: 900,
+    dur: 980,
     frame(t) {
       const k = key(t, [
         [0, 0],
-        [0.26, 1],
-        [0.62, 0.7],
+        [0.2, 1],
+        [0.48, 0.9],
+        [0.72, 0.35],
         [1, 0],
       ]);
+      const flail = Math.sin(t * Math.PI * 8) * k;
       return {
         pose: {
-          [BONE.spine]: { x: -0.6 * k },
-          [BONE.spine1]: { x: -0.3 * k },
-          [BONE.head]: { x: 0.5 * k },
-          [BONE.lArm]: { x: REST_ARM_X - 2.1 * k, z: -0.12 - 0.4 * k },
-          [BONE.rArm]: { x: REST_ARM_X - 2.1 * k, z: 0.12 + 0.4 * k },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.6 * k },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.6 * k },
-          [BONE.lUpLeg]: { x: -1.1 * k },
-          [BONE.rUpLeg]: { x: -0.85 * k },
-          [BONE.lLeg]: { x: 1.4 * k },
-          [BONE.rLeg]: { x: 1.1 * k },
+          [BONE.spine]: { x: -0.85 * k },
+          [BONE.spine1]: { x: -0.4 * k },
+          [BONE.head]: { x: 0.7 * k },
+          [BONE.lArm]: { x: REST_ARM_X - 2.2 * k + flail * 0.45, z: -0.12 - 0.55 * k },
+          [BONE.rArm]: { x: REST_ARM_X - 2.0 * k - flail * 0.45, z: 0.12 + 0.55 * k },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.5 * k },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.5 * k },
+          [BONE.lUpLeg]: { x: -1.25 * k },
+          [BONE.rUpLeg]: { x: -0.95 * k },
+          [BONE.lLeg]: { x: 1.55 * k },
+          [BONE.rLeg]: { x: 1.25 * k },
         },
-        hipY: -0.05 * k,
-        root: { pitch: -0.55 * k, z: -0.2 * k },
+        hipY: 0.08 * k,
+        root: { pitch: -0.55 * k, z: -0.12 * k },
       };
     },
   },
@@ -1310,33 +1420,44 @@ const REACT_CLIPS: Record<string, Clip> = {
           [BONE.lLeg]: { x: 0.9 * k },
           [BONE.rLeg]: { x: 1.1 * k },
         },
-        root: { pitch: -0.3 * k },
+        root: { z: -0.1 * clamp01(k) },
       };
     },
   },
 
   fall: {
-    dur: 720,
+    dur: 920,
     frame(t) {
       const k = key(t, [
         [0, 0],
-        [0.32, 1],
-        [0.72, 1],
+        [0.22, 1],
+        [0.55, 1],
+        [0.82, 0.45],
+        [1, 0],
+      ]);
+      const sit = key(t, [
+        [0, 0],
+        [0.28, 0.4],
+        [0.5, 1],
+        [0.85, 0.7],
         [1, 0],
       ]);
       return {
         pose: {
-          [BONE.spine]: { x: -0.3 * k },
-          [BONE.head]: { x: 0.35 * k },
-          [BONE.lArm]: { x: REST_ARM_X - 1.6 * k, z: -0.12 - 0.5 * k },
-          [BONE.rArm]: { x: REST_ARM_X - 1.6 * k, z: 0.12 + 0.5 * k },
-          [BONE.lUpLeg]: { x: -0.9 * k },
-          [BONE.rUpLeg]: { x: -0.7 * k },
-          [BONE.lLeg]: { x: 1.5 * k },
-          [BONE.rLeg]: { x: 1.3 * k },
+          [BONE.spine]: { x: -0.55 * k },
+          [BONE.spine1]: { x: -0.28 * k },
+          [BONE.head]: { x: 0.55 * k },
+          [BONE.lArm]: { x: REST_ARM_X - 1.8 * k, z: -0.12 - 0.7 * k },
+          [BONE.rArm]: { x: REST_ARM_X - 0.9 * k, z: 0.12 + 0.35 * k },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.8 * k },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.4 * k },
+          [BONE.lUpLeg]: { x: -0.35 * sit },
+          [BONE.rUpLeg]: { x: -1.15 * sit },
+          [BONE.lLeg]: { x: 1.15 * sit },
+          [BONE.rLeg]: { x: 1.45 * sit },
         },
-        hipY: -0.34 * k,
-        root: { pitch: -0.7 * k, z: -0.18 * k },
+        hipY: -0.38 * sit,
+        root: { pitch: 0.65 * sit, z: -0.1 * k },
       };
     },
   },
@@ -1360,10 +1481,10 @@ const REACT_CLIPS: Record<string, Clip> = {
           [BONE.rUpLeg]: { x: s2 * 0.85 },
           [BONE.lLeg]: { x: clamp01(-s) * 1.3 },
           [BONE.rLeg]: { x: clamp01(-s2) * 1.3 },
-          [BONE.lArm]: { x: REST_ARM_X + s2 * 0.9, z: -0.12 - 0.2 * hold },
-          [BONE.rArm]: { x: REST_ARM_X + s * 0.9, z: 0.12 + 0.2 * hold },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.1 * hold },
-          [BONE.rForeArm]: { x: REST_FORE_X + 1.1 * hold },
+          [BONE.lArm]: { x: REST_ARM_X + s2 * 0.4, z: -0.12 },
+          [BONE.rArm]: { x: REST_ARM_X + s * 0.4, z: 0.12 },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.1 * hold },
+          [BONE.rForeArm]: { x: REST_FORE_X - 1.1 * hold },
         },
         hipY: Math.abs(Math.sin(c)) * 0.03 * hold,
       };
@@ -1385,13 +1506,12 @@ const REACT_CLIPS: Record<string, Clip> = {
           [BONE.head]: { z: w * 0.42, x: 0.14 * hold },
           [BONE.neck]: { z: w * 0.16 },
           [BONE.spine1]: { z: -w * 0.12 },
-          [BONE.lArm]: { x: REST_ARM_X + 0.35 * hold, z: -0.12 - w * 0.25 },
-          [BONE.rArm]: { x: REST_ARM_X + 0.35 * hold, z: 0.12 - w * 0.25 },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.5 * hold },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.5 * hold },
+          [BONE.rArm]: { x: REST_ARM_X - 0.35 * hold, z: 0.12 - w * 0.25 },
+          [BONE.lArm]: { x: REST_ARM_X - 0.35 * hold, z: 0.12 + w * 0.25 },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.5 * hold },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.5 * hold },
         },
         hipY: -0.03 * hold,
-        root: { roll: w * 0.06 },
       };
     },
   },
@@ -1411,8 +1531,8 @@ const REACT_CLIPS: Record<string, Clip> = {
         pose: {
           [BONE.lArm]: { x: REST_ARM_X - 2.3 * air + flail * 0.3, z: -0.12 - 0.5 * air },
           [BONE.rArm]: { x: REST_ARM_X - 2.3 * air - flail * 0.3, z: 0.12 + 0.5 * air },
-          [BONE.lForeArm]: { x: REST_FORE_X + 0.7 * air },
-          [BONE.rForeArm]: { x: REST_FORE_X + 0.7 * air },
+          [BONE.lForeArm]: { x: REST_FORE_X - 0.7 * air },
+          [BONE.rForeArm]: { x: REST_FORE_X - 0.7 * air },
           [BONE.lUpLeg]: { x: -0.8 * air + flail * 0.35 },
           [BONE.rUpLeg]: { x: -0.8 * air - flail * 0.35 },
           [BONE.lLeg]: { x: 1.0 * air },
@@ -1420,7 +1540,7 @@ const REACT_CLIPS: Record<string, Clip> = {
           [BONE.spine]: { x: -0.25 * air },
           [BONE.head]: { x: 0.3 * air },
         },
-        root: { pitch: -0.2 * air, roll: flail * 0.08 },
+        root: { z: -0.08 * air },
       };
     },
   },
@@ -1439,8 +1559,8 @@ const REACT_CLIPS: Record<string, Clip> = {
         pose: {
           [BONE.lArm]: { x: REST_ARM_X - 2.0 * hold, z: -0.12 + 0.3 * hold },
           [BONE.rArm]: { x: REST_ARM_X - 2.0 * hold, z: 0.12 - 0.3 * hold },
-          [BONE.lForeArm]: { x: REST_FORE_X + 1.9 * hold },
-          [BONE.rForeArm]: { x: REST_FORE_X + 1.9 * hold },
+          [BONE.lForeArm]: { x: REST_FORE_X - 1.9 * hold },
+          [BONE.rForeArm]: { x: REST_FORE_X - 1.9 * hold },
           [BONE.spine]: { x: 0.3 * hold + sob * 0.05 },
           [BONE.head]: { x: 0.25 * hold },
         },
@@ -1473,17 +1593,17 @@ const MIRROR: Record<string, string> = {
 };
 
 function applyClipFrame(rig: Rig, f: ClipFrame, w: number, mirror = false): void {
-  // Mirroring swaps the limb and flips the axes that carry handedness; pitch
-  // (rotation.x) is unchanged because it is the same in both reflections.
-  const flip = mirror ? -1 : 1;
+  // Mirroring swaps L/R bones. Clip values are already authored per side, so
+  // only root travel/yaw flip — negating arm z on swap was twisting the torso.
+  const rootFlip = mirror ? -1 : 1;
 
   for (const name in f.pose) {
     const b = rig.bones[mirror ? (MIRROR[name] ?? name) : name];
     if (!b) continue;
     const p = f.pose[name];
     if (p.x !== undefined) b.rotation.x = lerp(b.rotation.x, p.x, w);
-    if (p.y !== undefined) b.rotation.y = lerp(b.rotation.y, p.y * flip, w);
-    if (p.z !== undefined) b.rotation.z = lerp(b.rotation.z, p.z * flip, w);
+    if (p.y !== undefined) b.rotation.y = lerp(b.rotation.y, p.y, w);
+    if (p.z !== undefined) b.rotation.z = lerp(b.rotation.z, p.z, w);
   }
 
   if (f.hipY !== undefined) {
@@ -1494,12 +1614,12 @@ function applyClipFrame(rig: Rig, f: ClipFrame, w: number, mirror = false): void
   const r = f.root;
   if (!r) return;
   const root = rig.root;
-  root.position.x = lerp(root.position.x, (r.x ?? 0) * flip, w);
+  root.position.x = lerp(root.position.x, (r.x ?? 0) * rootFlip, w);
   root.position.y = lerp(root.position.y, r.y ?? 0, w);
   root.position.z = lerp(root.position.z, r.z ?? 0, w);
   root.rotation.x = lerp(root.rotation.x, r.pitch ?? 0, w);
-  root.rotation.y = lerp(root.rotation.y, (r.yaw ?? 0) * flip, w);
-  root.rotation.z = lerp(root.rotation.z, (r.roll ?? 0) * flip, w);
+  root.rotation.y = lerp(root.rotation.y, (r.yaw ?? 0) * rootFlip, w);
+  root.rotation.z = lerp(root.rotation.z, (r.roll ?? 0) * rootFlip, w);
 }
 
 /* ————————————————— hand props ————————————————— */
@@ -1673,6 +1793,8 @@ export interface Avatar3D {
   setPointer(nx: number, ny: number): void;
   /** Plays an attacking move. Unknown ids are ignored. */
   attack(act: string): void;
+  /** Drops a looping clip (walk) so idle can take over. */
+  stopClip(): void;
   /** Plays a getting-hit reaction. Unknown ids are ignored. */
   react(anim: string): void;
   setWeapon(kind: Weapon3D): void;
@@ -1685,6 +1807,11 @@ export interface Avatar3DOptions {
   accent?: string;
   /** Body yaw in radians. Arena fighters turn to face each other. */
   facing?: number;
+  /**
+   * Swap left/right clip bones so the strike hand sits toward the opponent.
+   * Independent of `facing` — do not tie this to facing sign.
+   */
+  mirror?: boolean;
   /** Arena framing leaves headroom for kicks and overhead swings. */
   framing?: "preview" | "arena";
   /** Cursor head-tracking belongs to the builder, not the fight. */
@@ -1740,8 +1867,7 @@ export function mountAvatar3D(host: HTMLElement, opts: Avatar3DOptions = {}): Av
   const facing = opts.facing ?? 0;
   const arena = opts.framing === "arena";
   const pointerTracking = opts.pointerTracking !== false;
-  // Turned to screen-right, so the near arm is the left one.
-  const mirror = facing > 0;
+  const mirror = opts.mirror ?? false;
 
   let renderer: THREE.WebGLRenderer;
   try {
@@ -1782,10 +1908,10 @@ export function mountAvatar3D(host: HTMLElement, opts: Avatar3DOptions = {}): Av
   anchor.rotation.y = facing;
   scene.add(anchor);
 
-  const hemi = new THREE.HemisphereLight(0xffe6c0, 0x2a1c16, 0.5);
+  const hemi = new THREE.HemisphereLight(0xffe6c0, 0x2a1c16, 0.65);
   scene.add(hemi);
 
-  const keyLight = new THREE.DirectionalLight(0xfff4e2, 1.7);
+  const keyLight = new THREE.DirectionalLight(0xfff4e2, 1.35);
   keyLight.position.set(1.5, 2.6, 2.2);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.set(1024, 1024);
@@ -1801,7 +1927,7 @@ export function mountAvatar3D(host: HTMLElement, opts: Avatar3DOptions = {}): Av
   scene.add(keyLight);
 
   // Coloured rim separates the silhouette from the dark stage background.
-  const rim = new THREE.DirectionalLight(new THREE.Color(accent), 0.55);
+  const rim = new THREE.DirectionalLight(new THREE.Color(accent), 0.42);
   rim.position.set(-2.2, 1.6, -1.8);
   scene.add(rim);
 
@@ -1822,6 +1948,7 @@ export function mountAvatar3D(host: HTMLElement, opts: Avatar3DOptions = {}): Av
   let weaponKind: Weapon3D = null;
   let clip: Clip | null = null;
   let clipTime = 0;
+  let clipReact = false;
   const splatKinds = new Set<SplatKind>();
   const splatGroups = new Map<SplatKind, THREE.Group>();
   let time = 0;
@@ -1903,29 +2030,45 @@ export function mountAvatar3D(host: HTMLElement, opts: Avatar3DOptions = {}): Av
       }
       time += dt;
 
-      // Idle breathing and weight shift.
+      const b = rig.bones;
+      resetCombatBones(b);
+
+      // Idle breathing and weight shift, layered on the rest pose.
       const breath = Math.sin(time * 1.7);
       const sway = Math.sin(time * 0.8);
-      const b = rig.bones;
       b[BONE.spine].rotation.x = -0.02 + breath * 0.012;
-      b[BONE.spine1].scale.set(1 + breath * 0.012, 1 + breath * 0.008, 1 + breath * 0.012);
-      b[BONE.spine2].rotation.y = sway * 0.05;
+      if (!clip) {
+        b[BONE.spine1].scale.set(1 + breath * 0.012, 1 + breath * 0.008, 1 + breath * 0.012);
+      } else {
+        b[BONE.spine1].scale.set(1, 1, 1);
+      }
+      b[BONE.spine2].rotation.y = clip ? 0 : sway * 0.05;
       b[BONE.hips].position.y = HIP_Y + breath * 0.006;
-      b[BONE.hips].rotation.z = sway * 0.012;
+      b[BONE.hips].rotation.z = clip ? 0 : sway * 0.012;
 
-      b[BONE.lArm].rotation.x = 0.06 + Math.sin(time * 1.6 + 0.4) * 0.05;
-      b[BONE.rArm].rotation.x = 0.06 + Math.sin(time * 1.6 - 0.4) * 0.05;
-      b[BONE.lArm].rotation.z = -0.12 - Math.abs(sway) * 0.03;
-      b[BONE.rArm].rotation.z = 0.12 + Math.abs(sway) * 0.03;
+      if (!clip) {
+        b[BONE.lArm].rotation.x = REST_ARM_X + Math.sin(time * 1.6 + 0.4) * 0.05;
+        b[BONE.rArm].rotation.x = REST_ARM_X + Math.sin(time * 1.6 - 0.4) * 0.05;
+        b[BONE.lArm].rotation.z = -0.12 - Math.abs(sway) * 0.03;
+        b[BONE.rArm].rotation.z = 0.12 + Math.abs(sway) * 0.03;
+      }
 
-      // Head follows the cursor, with a little idle drift.
-      pointerX += (targetPointerX - pointerX) * Math.min(1, dt * 6);
-      pointerY += (targetPointerY - pointerY) * Math.min(1, dt * 6);
-      b[BONE.head].rotation.y = pointerX * 0.45 + sway * 0.06;
-      b[BONE.head].rotation.x = -pointerY * 0.25 + breath * 0.01;
-      b[BONE.head].rotation.z = moodTilt;
       rig.root.position.set(0, 0, 0);
-      rig.root.rotation.set(0, pointerX * 0.3, 0);
+      if (pointerTracking) {
+        // Builder preview: head and torso follow the cursor.
+        pointerX += (targetPointerX - pointerX) * Math.min(1, dt * 6);
+        pointerY += (targetPointerY - pointerY) * Math.min(1, dt * 6);
+        b[BONE.head].rotation.y = pointerX * 0.45 + sway * 0.06;
+        b[BONE.head].rotation.x = -pointerY * 0.25 + breath * 0.01;
+        b[BONE.head].rotation.z = moodTilt;
+        rig.root.rotation.set(0, pointerX * 0.3, 0);
+      } else {
+        // Arena: body yaw lives on the anchor so the face stays with the torso.
+        b[BONE.head].rotation.y = clip ? 0 : sway * 0.04;
+        b[BONE.head].rotation.x = breath * 0.01;
+        b[BONE.head].rotation.z = moodTilt;
+        rig.root.rotation.set(0, 0, 0);
+      }
 
       // Blinking, unless the mood already holds the eyes shut.
       if (eyeOpenTarget > 0.5) {
@@ -1952,19 +2095,37 @@ export function mountAvatar3D(host: HTMLElement, opts: Avatar3DOptions = {}): Av
       // on and off at the edges.
       if (clip) {
         clipTime += dt;
-        const t = clipTime / ((clip.dur / 1000) * CLIP_TIME_SCALE);
-        if (t >= 1) {
-          applyClipFrame(rig, clip.frame(1), 1, mirror);
-          clip = null;
+        if (clip.loop) {
+          const t = (clipTime / (clip.dur / 1000)) % 1;
+          applyClipFrame(rig, clip.frame(t), 1, mirror);
         } else {
-          const w = key(t, [
-            [0, 0],
-            [0.07, 1],
-            [0.9, 1],
-            [1, 0],
-          ]);
-          applyClipFrame(rig, clip.frame(t), w, mirror);
+          const scale = clipReact ? 1.05 : CLIP_TIME_SCALE;
+          const t = clipTime / ((clip.dur / 1000) * scale);
+          if (t >= 1) {
+            clip = null;
+            clipReact = false;
+          } else {
+            const w = key(t, [
+              [0, 0],
+              [0.07, 1],
+              [0.9, 1],
+              [1, 0],
+            ]);
+            applyClipFrame(rig, clip.frame(t), w, mirror);
+          }
         }
+      }
+
+      // Keep clip root pitch/yaw off the arena rig — facing is on the anchor
+      // so You and Foe stay turned toward each other instead of flipping.
+      if (arena) {
+        // Attacks keep facing the opponent. Hit reacts may pitch/roll like a fall.
+        if (!clipReact) rig.root.rotation.y = 0;
+        if (!clipReact) {
+          rig.root.rotation.x = 0;
+          rig.root.rotation.z = 0;
+        }
+        anchor.rotation.y = facing;
       }
 
       renderer.render(scene, camera);
@@ -1997,12 +2158,18 @@ export function mountAvatar3D(host: HTMLElement, opts: Avatar3DOptions = {}): Av
       if (!next) return;
       clip = next;
       clipTime = 0;
+      clipReact = false;
+    },
+    stopClip(): void {
+      clip = null;
+      clipReact = false;
     },
     react(anim: string): void {
       const next = REACT_CLIPS[anim];
       if (!next) return;
       clip = next;
       clipTime = 0;
+      clipReact = true;
     },
     setWeapon(kind: Weapon3D): void {
       if (kind === weaponKind) return;

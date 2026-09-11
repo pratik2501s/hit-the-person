@@ -318,7 +318,7 @@ export const HINTS: Record<ActId, string> = {
 
 export const ACT_REACTIONS: Record<ActId, ActReaction> = {
   punch: { mood: "hurt", anim: "hit" },
-  slap: { mood: "shocked", anim: "spin" },
+  slap: { mood: "shocked", anim: "hit" },
   kick: { mood: "shocked", anim: "launch", hard: true },
   mud: { mood: "angry", anim: "hit" },
   water: { mood: "scared", anim: "dunk", hard: true },

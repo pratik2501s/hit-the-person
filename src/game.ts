@@ -1,7 +1,10 @@
 import { SFX } from "./audio";
 import {
   playAttack,
+  stopAttack,
   playReaction,
+  mountArenaFighters,
+  releaseAvatar,
   renderAvatar,
   setAvatarMood,
   setAvatarWeapon,
@@ -82,15 +85,18 @@ const YOU_ACTS = [
   "act-ultimate",
   "approaching",
 ];
-// Arena fighters turn three-quarters toward each other: enough to read as a
-// face-off, not so much that the face is lost in profile.
+// Each canvas camera sits on +Z. Positive yaw turns the local +Z (the face
+// and the strike) toward screen-right, so You looks at the foe; negative
+// yaw turns the foe toward You. ~55° keeps a readable three-quarter.
 const YOU_FIGHTER_VIEW: Avatar3DOptions = {
-  facing: 1,
+  facing: 1.15,
+  mirror: true,
   framing: "arena",
   pointerTracking: false,
 };
 const FOE_FIGHTER_VIEW: Avatar3DOptions = {
-  facing: -1,
+  facing: -1.15,
+  mirror: false,
   framing: "arena",
   pointerTracking: false,
 };
@@ -611,35 +617,91 @@ export function startGame(): void {
     setTimeout(() => b.remove(), 450);
   }
 
-  /** Walk you into real contact range. Foe stays planted. */
-  async function approach(youF: HTMLElement, foeF: HTMLElement): Promise<void> {
-    const you = youF.getBoundingClientRect();
-    const foe = foeF.getBoundingClientRect();
-    // Overlap a bit so the slap/punch lands on the body, not empty air. A WebGL
-    // fighter is a small figure inside a wide transparent canvas, so it needs
-    // far more element overlap than the SVG figure to actually reach.
-    const is3d = youF.querySelector(".char")?.classList.contains("is-3d") ?? false;
-    const desiredGap = is3d ? -Math.round(you.width * 0.5) : -36;
-    const currentGap = foe.left - you.right;
-    const travel = Math.max(0, currentGap - desiredGap);
+  /** Walk you into range. Distance scales with hold-power (1 tap step … 3 full steps). */
+  let hitPower = 0.55;
+  let approachDurMs = 280;
+
+  function power01(): number {
+    return Math.max(0.2, Math.min(1, hitPower));
+  }
+
+  async function approach(youF: HTMLElement, _foeF: HTMLElement): Promise<void> {
+    const p = power01();
+    // Gap between canvases is already small — don't use bounding-box overlap
+    // or they "walk" in place. Always take 1–3 real steps from hold power.
+    const stepPx = 70;
+    const steps = 1 + p * 2;
+    const travel = Math.round(stepPx * steps);
+    const dur = steps * 0.26;
+    approachDurMs = Math.round(dur * 1000);
 
     youF.style.setProperty("--approach", `${travel}px`);
+    youF.style.setProperty("--approach-dur", `${dur}s`);
     youF.classList.add("approaching");
     playAttack($("#char-you"), "walk");
-    await beat(380);
+    await beat(approachDurMs);
+    stopAttack($("#char-you"));
   }
 
   async function retreat(youF: HTMLElement): Promise<void> {
     youF.classList.remove("approaching");
-    playAttack($("#char-you"), "walk");
-    // Keep --approach until transition finishes, then clear
-    await beat(340);
+    const dur = Math.min(0.42, approachDurMs / 1000);
+    youF.style.setProperty("--approach-dur", `${dur}s`);
+    if (approachDurMs > 160) playAttack($("#char-you"), "walk");
+    await beat(Math.round(dur * 1000));
     youF.style.removeProperty("--approach");
+    stopAttack($("#char-you"));
   }
 
   function resetApproach(youF: HTMLElement): void {
     youF.classList.remove("approaching");
     youF.style.removeProperty("--approach");
+    stopAttack($("#char-you"));
+  }
+
+  function knockProfile(act: ActId, p: number): { x: number; y: number; r: number; dur: number; anim: FoeAnim } {
+    const w = 0.35 + p * 0.65;
+    const table: Record<string, { x: number; y: number; r: number; dur: number; anim: FoeAnim }> = {
+      punch: { x: 96, y: -28, r: 14, dur: 0.85, anim: "hit" },
+      slap: { x: 120, y: -36, r: 48, dur: 0.95, anim: p > 0.65 ? "spin" : "hit" },
+      kick: { x: 168, y: -110, r: 38, dur: 1.15, anim: "launch" },
+      headbutt: { x: 88, y: -22, r: 18, dur: 0.88, anim: "hit" },
+      push: { x: 150, y: -40, r: 55, dur: 1.15, anim: "fall" },
+      hammer: { x: 180, y: -120, r: 50, dur: 1.25, anim: "launch" },
+      fryingpan: { x: 155, y: -90, r: 70, dur: 1.15, anim: "spin" },
+      foambat: { x: 100, y: -32, r: 16, dur: 0.85, anim: "hit" },
+      slipper: { x: 90, y: -24, r: 14, dur: 0.82, anim: "hit" },
+      uppercut: { x: 40, y: -160, r: -22, dur: 1.2, anim: "upper" },
+      ultimate: { x: 190, y: -80, r: 30, dur: 1.3, anim: "run" },
+      shake: { x: 24, y: -8, r: 10, dur: 0.75, anim: "shake" },
+      water: { x: 50, y: 56, r: 12, dur: 1.25, anim: "dunk" },
+      mud: { x: 70, y: -16, r: 10, dur: 0.78, anim: "hit" },
+      pie: { x: 74, y: -18, r: 12, dur: 0.8, anim: "hit" },
+      tomato: { x: 70, y: -16, r: 10, dur: 0.78, anim: "hit" },
+      banana: { x: 140, y: -48, r: 58, dur: 1.12, anim: "fall" },
+      watergun: { x: 54, y: -12, r: 8, dur: 0.7, anim: "hit" },
+      taunt: { x: 12, y: 0, r: 4, dur: 0.4, anim: "hit" },
+    };
+    const t = table[act] ?? table.punch;
+    return {
+      x: Math.round(t.x * w),
+      y: Math.round(t.y * w),
+      r: Math.round(t.r * (0.45 + 0.55 * p)),
+      dur: t.dur * (0.75 + 0.4 * p),
+      anim: p < 0.32 && t.anim !== "dunk" ? "hit" : t.anim,
+    };
+  }
+
+  function playCartoonKnock(foeF: HTMLElement, act: ActId): FoeAnim {
+    const k = knockProfile(act, power01());
+    foeF.style.setProperty("--kx", `${k.x}px`);
+    foeF.style.setProperty("--ky", `${k.y}px`);
+    foeF.style.setProperty("--kr", `${k.r}deg`);
+    foeF.style.setProperty("--knock-dur", `${k.dur}s`);
+    foeF.classList.remove("cartoon-knock");
+    void foeF.offsetWidth;
+    foeF.classList.add("cartoon-knock");
+    return k.anim;
   }
 
   function clearFighterClasses(el: HTMLElement, list: string[]): void {
@@ -682,8 +744,10 @@ export function startGame(): void {
     point: { x: number; y: number; absX: number; absY: number },
     wordKey: ActId,
   ): Promise<void> {
+    const p = power01();
     const reaction = ACT_REACTIONS[wordKey];
-    const hard = reaction.hard ?? false;
+    const anim = playCartoonKnock(foeF, wordKey);
+    const hard = (reaction.hard ?? false) || p > 0.72;
     const sfxKey =
       wordKey === "fryingpan" || wordKey === "foambat"
         ? "hammer"
@@ -699,15 +763,16 @@ export function startGame(): void {
     flash();
     shake(hard);
     contactBurstAt(point.x, point.y);
-    foeF.classList.add(reaction.anim);
-    playReaction(foeC, reaction.anim);
-    await hitStop(hard ? 120 : 90);
+    foeF.classList.add(anim);
+    playReaction(foeC, anim);
+    await hitStop(hard ? 80 + p * 80 : 50 + p * 50);
     showBam(pick(BAM[wordKey]), point.x - 30, point.y - 50);
     showSpeech(pick(FOE_LINES[wordKey]));
     ringAt(point.x, point.y);
-    burst(point.absX, point.absY, hard ? 22 : 14);
+    burst(point.absX, point.absY, Math.round((hard ? 18 : 10) * (0.6 + p)));
     setAvatarMood(foeC, state.foe, reaction.mood as Mood);
     applyImpactMarks(foeC, wordKey);
+    await beat(Math.round(knockProfile(wordKey, p).dur * 520));
   }
 
   async function actPunch(youF: HTMLElement, foeF: HTMLElement, foeC: HTMLElement) {
@@ -900,11 +965,12 @@ export function startGame(): void {
     await beat(900);
   }
 
-  async function runAct(act: ActId): Promise<void> {
+  async function runAct(act: ActId, power = 0.55): Promise<void> {
     if (state.busy || state.sessionOver) return;
     if (!isMoveUnlocked(act, getSessions()) && act !== "ultimate") return;
     if (act === "ultimate" && state.ultimateCharge < ULTIMATE_NEED) return;
     SFX.ensure();
+    hitPower = act === "ultimate" ? 1 : Math.max(0.2, Math.min(1, power));
     setBusy(true);
 
     const youF = $("#fighter-you");
@@ -981,13 +1047,14 @@ export function startGame(): void {
       if (act === "ultimate") {
         updateRage(28 + Math.random() * 6);
       } else {
-        chargeUltimate(act === "taunt" ? 6 : 12);
+        chargeUltimate(act === "taunt" ? 6 : Math.round(8 + hitPower * 10));
         const bonus = Math.min(8, state.combo);
-        updateRage((act === "taunt" ? 4 : 11) + bonus + Math.random() * 4);
+        updateRage(((act === "taunt" ? 4 : 8) + bonus) * (0.55 + hitPower * 0.7) + Math.random() * 3);
       }
     } finally {
       clearFighterClasses(youF, YOU_ACTS);
       clearFighterClasses(foeF, FOE_ACTS);
+      foeF.classList.remove("cartoon-knock");
       resetApproach(youF);
       setAvatarMood(youC, state.you, "ready");
       setAvatarMood(foeC, state.foe, foeIdleMood(state.foe));
@@ -1238,8 +1305,11 @@ export function startGame(): void {
     resetApproach(youF);
 
     $("#arena").dataset.scene = state.scene;
-    renderAvatar($("#char-you"), state.you, "ready", YOU_FIGHTER_VIEW);
-    renderAvatar($("#char-foe"), state.foe, foeIdleMood(state.foe), FOE_FIGHTER_VIEW);
+    // Builder previews hold two WebGL contexts — drop them so both arena
+    // fighters can mount. Show the arena first so canvas sizing is non-zero.
+    releaseAvatar($("#char-you-preview"));
+    releaseAvatar($("#char-foe-preview"));
+    showScreen("#screen-arena");
     $("#tag-you").textContent = state.you.name;
     $("#tag-foe").textContent = state.foe.name;
     $("#pool").hidden = true;
@@ -1262,7 +1332,16 @@ export function startGame(): void {
     youF.classList.add("idle");
     foeF.classList.add("idle");
     setBusy(false);
-    showScreen("#screen-arena");
+    void mountArenaFighters(
+      $("#char-you"),
+      state.you,
+      "ready",
+      YOU_FIGHTER_VIEW,
+      $("#char-foe"),
+      state.foe,
+      foeIdleMood(state.foe),
+      FOE_FIGHTER_VIEW,
+    );
     scheduleIdleTalk();
     SFX.ui();
   }
@@ -1479,29 +1558,96 @@ export function startGame(): void {
   });
 
   $$(".move").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("pointerdown", (e) => {
+      if ((btn as HTMLButtonElement).disabled) return;
       const act = btn.dataset.act as ActId;
-      if (!isMoveUnlocked(act, getSessions())) {
-        const need = MOVES.find((m) => m.act === act)?.unlockAt ?? 0;
-        showToast(`Unlock after ${need} session${need === 1 ? "" : "s"}`);
-        return;
-      }
-      void runAct(act);
+      if (!isMoveUnlocked(act, getSessions())) return;
+      e.preventDefault();
+      beginCharge(act, btn, "pointer");
     });
+    btn.addEventListener("click", (e) => e.preventDefault());
+  });
+
+  const CHARGE_MS = 900;
+  const INSTANT_ACTS = new Set<ActId>(["taunt", "ultimate"]);
+  let charge:
+    | { act: ActId; started: number; btn: HTMLElement | null; raf: number; from: "pointer" | "key" }
+    | null = null;
+
+  function paintCharge(p: number, btn: HTMLElement | null): void {
+    const bar = $("#hit-power");
+    const fill = $("#hit-power-fill");
+    const val = $("#hit-power-val");
+    bar.hidden = false;
+    fill.style.width = `${Math.round(p * 100)}%`;
+    val.textContent = `${Math.round(p * 100)}%`;
+    if (btn) btn.style.setProperty("--charge", `${Math.round(p * 100)}`);
+  }
+
+  function beginCharge(act: ActId, btn: HTMLElement | null, from: "pointer" | "key"): void {
+    if (state.busy || state.sessionOver || charge) return;
+    if (INSTANT_ACTS.has(act)) {
+      void runAct(act, 1);
+      return;
+    }
+    if (!isMoveUnlocked(act, getSessions()) && act !== "ultimate") {
+      const need = MOVES.find((m) => m.act === act)?.unlockAt ?? 0;
+      showToast(`Unlock after ${need} session${need === 1 ? "" : "s"}`);
+      return;
+    }
+    SFX.ensure();
+    charge = { act, started: performance.now(), btn, raf: 0, from };
+    btn?.classList.add("charging");
+    $("#hint").textContent = "Hold to charge — release to hit.";
+    const tick = (): void => {
+      if (!charge) return;
+      const t = (performance.now() - charge.started) / CHARGE_MS;
+      const p = 0.2 + 0.8 * Math.min(1, t);
+      paintCharge(p, charge.btn);
+      charge.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  function finishCharge(): void {
+    if (!charge) return;
+    const { act, started, btn, raf } = charge;
+    cancelAnimationFrame(raf);
+    const t = (performance.now() - started) / CHARGE_MS;
+    const p = 0.2 + 0.8 * Math.min(1, t);
+    charge = null;
+    btn?.classList.remove("charging");
+    btn?.style.removeProperty("--charge");
+    $("#hit-power").hidden = true;
+    void runAct(act, p);
+  }
+
+  window.addEventListener("pointerup", () => {
+    if (charge?.from === "pointer") finishCharge();
+  });
+  window.addEventListener("pointercancel", () => {
+    if (charge?.from === "pointer") finishCharge();
   });
 
   window.addEventListener("keydown", (e) => {
     if (!$("#screen-arena").classList.contains("active")) return;
+    if (e.repeat) return;
     if (e.code === "Space") e.preventDefault();
     const act = KEY_MAP[e.code];
-    if (act) {
-      e.preventDefault();
-      void runAct(act);
-    }
+    if (!act) return;
+    e.preventDefault();
+    const btn = document.querySelector(`.move[data-act="${act}"]`) as HTMLElement | null;
+    beginCharge(act, btn, "key");
+  });
+
+  window.addEventListener("keyup", (e) => {
+    if (!charge || charge.from !== "key") return;
+    const act = KEY_MAP[e.code];
+    if (act && act === charge.act) finishCharge();
   });
 
   $("#fighter-foe").addEventListener("click", () => {
-    if ($("#screen-arena").classList.contains("active")) void runAct("punch");
+    if ($("#screen-arena").classList.contains("active")) void runAct("punch", 0.45);
   });
 
   bindForm("#form-you", "you", "#char-you-preview");

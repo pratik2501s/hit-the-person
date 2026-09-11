@@ -340,7 +340,12 @@ export function buildAppShell(): string {
 
     <div class="dock">
       <div class="dock-top">
-        <p class="dock-hint" id="hint">Pick a move. Make it count.</p>
+        <p class="dock-hint" id="hint">Pick a move. Hold to charge power.</p>
+        <div class="hit-power" id="hit-power" hidden>
+          <span class="hit-power-label">POWER</span>
+          <span class="hit-power-bar"><i id="hit-power-fill"></i></span>
+          <span class="hit-power-val" id="hit-power-val">20%</span>
+        </div>
         <button type="button" class="btn-ultimate" id="btn-ultimate" disabled>
           <span class="ult-label">ULTIMATE</span>
           <span class="ult-charge"><i id="ult-fill"></i></span>

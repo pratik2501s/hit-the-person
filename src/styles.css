@@ -410,20 +410,99 @@ button { cursor: pointer; border: none; background: none; }
 
 /* Knockbacks minus their rotateY, which would turn the canvas edge-on. The 3D
    rig spins on its own axis instead. */
-.foe-side.hit .char.is-3d {
-  animation: recoils3d 0.96s cubic-bezier(0.2, 0.8, 0.2, 1);
+/* Hit reactions are bone clips in WebGL — SVG travel/rotate keyframes skew the
+   canvas and make the victim look like a different flat card. */
+.foe-side.hit .char.is-3d,
+.foe-side.spin .char.is-3d,
+.foe-side.launch .char.is-3d,
+.foe-side.shake .char.is-3d,
+.foe-side.dunk .char.is-3d,
+.foe-side.upper .char.is-3d,
+.foe-side.fall .char.is-3d,
+.foe-side.run .char.is-3d,
+.foe-side.cry .char.is-3d {
+  animation: none;
 }
 
-.foe-side.spin .char.is-3d {
-  animation: spinHit3d 1.22s cubic-bezier(0.2, 0.85, 0.25, 1);
+.foe-side.cartoon-knock {
+  transition: none;
+  animation: cartoonFly var(--knock-dur, 0.9s) cubic-bezier(0.16, 0.84, 0.32, 1) both;
 }
 
-@keyframes recoils3d {
+@keyframes cartoonFly {
   0% { transform: translate(0, 0) rotate(0); }
-  18% { transform: translate(34px, -10px) rotate(9deg); }
-  40% { transform: translate(18px, 4px) rotate(-3deg); }
-  65% { transform: translate(8px, -2px) rotate(2deg); }
+  18% { transform: translate(var(--kx), var(--ky)) rotate(var(--kr)); }
+  42% { transform: translate(calc(var(--kx) * 0.82), calc(var(--ky) * 0.12)) rotate(calc(var(--kr) * 0.45)); }
+  68% { transform: translate(calc(var(--kx) * 0.22), 10px) rotate(calc(var(--kr) * -0.12)); }
   100% { transform: translate(0, 0) rotate(0); }
+}
+
+.hit-power {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 160px;
+}
+
+.hit-power-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+}
+
+.hit-power-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.hit-power-bar i {
+  display: block;
+  height: 100%;
+  width: 20%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #ffb020, #ff4d1a);
+}
+
+.hit-power-val {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: #f0e6d8;
+  min-width: 2.4em;
+}
+
+.move.charging {
+  border-color: var(--ember);
+  box-shadow: 0 0 0 2px #ff4d1a55;
+}
+
+.move.charging::after {
+  content: "";
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 5px;
+  height: 4px;
+  border-radius: 99px;
+  background: rgba(255, 176, 32, 0.2);
+  pointer-events: none;
+}
+
+.move.charging::before {
+  content: "";
+  position: absolute;
+  left: 8%;
+  bottom: 5px;
+  height: 4px;
+  width: calc(var(--charge, 20) * 1%);
+  max-width: 84%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #ffb020, #ff4d1a);
+  pointer-events: none;
+  z-index: 1;
 }
 
 @keyframes spinHit3d {
@@ -803,11 +882,16 @@ button { cursor: pointer; border: none; background: none; }
   flex-direction: column;
   align-items: center;
   gap: 0.35rem;
-  transition: transform 0.62s cubic-bezier(0.22, 1, 0.36, 1);
   will-change: transform;
   --approach: 0px;
+  --approach-dur: 0.42s;
+  --kx: 0px;
+  --ky: 0px;
+  --kr: 0deg;
+  --knock-dur: 0.9s;
   perspective: 700px;
   transform-style: preserve-3d;
+  transition: transform var(--approach-dur, 0.42s) cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .you-side { left: 12%; }
@@ -1084,6 +1168,11 @@ button { cursor: pointer; border: none; background: none; }
 .you-side.approaching {
   transform: translateX(var(--approach));
   z-index: 6;
+}
+
+.foe-side.cartoon-knock {
+  transition: none;
+  animation: cartoonFly var(--knock-dur, 0.9s) cubic-bezier(0.16, 0.84, 0.32, 1) both;
 }
 
 .you-side.approaching .leg-l {
